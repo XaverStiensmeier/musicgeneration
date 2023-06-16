@@ -22,6 +22,22 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 # Sampling rate for audio playback
 _SAMPLING_RATE = 16000
+pretty_midi.pretty_midi.MAX_TICK = 1e10
+
+
+def get_music_by_emotion(emotion, toptag=True):
+    df = pd.read_csv('data/YM2413-MDB-v1.0.2/emotion_annotation/verified_annotation_old.csv', delimiter=',')
+
+    # Filter DataFrame based on emotion
+    if toptag:
+        filtered_data = df[df['toptag_eng_verified'] == emotion]
+    else:
+        filtered_data = df[df['verified_tags'].str.contains(emotion)]
+
+    # wav to midi
+    fnames = [f"data/YM2413-MDB-v1.0.2/midi/adjust_tempo_remove_delayed_inst/{name[:-3]}mid" for name in filtered_data['fname']]
+    print(len(fnames))
+    return fnames
 
 
 def notes_to_midi(
@@ -234,6 +250,7 @@ def predict_next_note(
 
 def train():
     num_files = 5
+    print(filenames[:num_files])
     all_notes = []
     for f in filenames[:num_files]:
         notes = midi_to_notes(f)
@@ -383,8 +400,8 @@ if __name__ == '__main__':
             extract=True,
             cache_dir='.', cache_subdir='data',
         )
-    filenames = glob.glob(str(data_dir / '**/*.mid*'))
-
+    # filenames = glob.glob(str(data_dir / '**/*.mid*'))
+    filenames = get_music_by_emotion("tense")
     # do_stuff()
     train()
 
