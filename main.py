@@ -23,7 +23,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # Sampling rate for audio playback
 _SAMPLING_RATE = 16000
 pretty_midi.pretty_midi.MAX_TICK = 1e10
-Q = "Q2"
+Q = "Q4"
+
 
 def get_music_by_emotion(emotion, toptag=True):
     df = pd.read_csv('data/YM2413-MDB-v1.0.2/emotion_annotation/verified_annotation_old.csv', delimiter=',')
@@ -56,8 +57,13 @@ def notes_to_midi(
     for i, note in notes.iterrows():
         start = float(prev_start + note['step'])
         end = float(start + note['duration'])
+        print(int(note.get("velocity")) or velocity)
+        print(int(note['pitch']))
+        print(start)
+        print(end)
+        print("---")
         note = pretty_midi.Note(
-            velocity=velocity,
+            velocity=int(note.get("velocity")) or velocity,
             pitch=int(note['pitch']),
             start=start,
             end=end,
@@ -130,6 +136,7 @@ def midi_to_notes(midi_file: str) -> pd.DataFrame:
         notes['end'].append(end)
         notes['step'].append(start - prev_start)
         notes['duration'].append(end - start)
+        notes['velocity'].append(note.velocity)
         prev_start = start
 
     return pd.DataFrame({name: np.array(value) for name, value in notes.items()})
@@ -193,14 +200,14 @@ def create_sequences(
 
     # Normalize note pitch
     def scale_pitch(x):
-        x = x / [vocab_size, 1.0, 1.0]  # divide pitch by vocab size
+        x = x / [vocab_size, 1.0, 1.0, 1.0]  # divide pitch by vocab size
         return x
 
     # Split the labels
     def split_labels(sequences):
         inputs = sequences[:-1]  # take everything but last element of a sequence as input
         labels_dense = sequences[-1]  # take last element of a sequence as label
-        key_order = ['pitch', 'step', 'duration']
+        key_order = ['pitch', 'step', 'duration', 'velocity']
         labels = {key: labels_dense[i] for i, key in enumerate(key_order)}
         return scale_pitch(inputs), labels
 
@@ -231,22 +238,29 @@ def predict_next_note(
     pitch_logits = predictions['pitch']
     step = predictions['step']
     duration = predictions['duration']
+    velocity = predictions['velocity']
 
     pitch_logits /= temperature
     pitch = tf.random.categorical(pitch_logits, num_samples=1)
     pitch = tf.squeeze(pitch, axis=-1)
     duration = tf.squeeze(duration, axis=-1)
     step = tf.squeeze(step, axis=-1)
+    velocity = tf.squeeze(velocity, axis=-1)
 
     # `step` and `duration` values should be non-negative
     if step < 0:
+        print(step)
         print(f"Step <0 during prediction!")
     step = tf.maximum(0, step)
     if duration < 0:
+        print(duration)
         print(f"Duration <0 during prediction!")
     duration = tf.maximum(0, duration)
+    if velocity < 0:
+        print(velocity)
+        print(f"Velocity <0 during prediction!")
 
-    return int(pitch), float(step), float(duration)
+    return int(pitch), float(step), float(duration), int(velocity)
 
 
 def train():
@@ -263,7 +277,7 @@ def train():
     n_notes = len(all_notes)
     print('Number of notes parsed:', n_notes)
 
-    key_order = ['pitch', 'step', 'duration']
+    key_order = ['pitch', 'step', 'duration', 'velocity']
     train_notes = np.stack([all_notes[key] for key in key_order], axis=1)  # turn array into key_order
 
     notes_ds = tf.data.Dataset.from_tensor_slices(train_notes)  # just another data format
@@ -284,7 +298,7 @@ def train():
                 .cache()
                 .prefetch(tf.data.experimental.AUTOTUNE))
 
-    input_shape = (seq_length, 3)
+    input_shape = (seq_length, 4)  # (seq_length, number of loss variables)
     learning_rate = 0.005
 
     inputs = tf.keras.Input(input_shape)
@@ -294,6 +308,7 @@ def train():
         'pitch': tf.keras.layers.Dense(128, name='pitch')(x),
         'step': tf.keras.layers.Dense(1, name='step')(x),
         'duration': tf.keras.layers.Dense(1, name='duration')(x),
+        'velocity': tf.keras.layers.Dense(1, name='velocity')(x),
     }
 
     model = tf.keras.Model(inputs, outputs)
@@ -303,6 +318,7 @@ def train():
             from_logits=True),
         'step': mse_with_positive_pressure,
         'duration': mse_with_positive_pressure,
+        'velocity': mse_with_positive_pressure,
     }
 
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
@@ -316,9 +332,10 @@ def train():
     model.compile(
         loss=loss,
         loss_weights={
-            'pitch': 1.0,  # 0.05
+            'pitch': 0.9,  # 0.05
             'step': 1.0,
             'duration': 1.0,
+            'velocity': 0,
         },
         optimizer=optimizer,
     )
@@ -357,16 +374,16 @@ def train():
     # The initial sequence of notes; pitch is normalized similar to training
     # sequences
     input_notes = (
-            sample_notes[:seq_length] / np.array([vocab_size, 1, 1]))
+            sample_notes[:seq_length] / np.array([vocab_size, 1, 1, 1]))
 
     for x in range(2):
         generated_notes = []
         prev_start = 0
         for _ in range(num_predictions):
-            pitch, step, duration = predict_next_note(input_notes, model, temperature)
+            pitch, step, duration, velocity = predict_next_note(input_notes, model, temperature)
             start = prev_start + step
             end = start + duration
-            input_note = (pitch, step, duration)
+            input_note = (pitch, step, duration, velocity)
             generated_notes.append((*input_note, start, end))
             input_notes = np.delete(input_notes, 0, axis=0)
             input_notes = np.append(input_notes, np.expand_dims(input_note, 0), axis=0)
@@ -383,7 +400,7 @@ def train():
         instrument = pm.instruments[0]
         instrument_name = pretty_midi.program_to_instrument_name(instrument.program)
 
-        example_file = f"{Q}_example_{x}_{datetime.datetime.now().strftime('%H:%M:%S')}.midi"
+        example_file = f"{Q}_example_{datetime.datetime.now().strftime('%H:%M:%S')}_{x}.midi"
         example_pm = notes_to_midi(
             generated_notes, out_file=example_file, instrument_name=instrument_name)
         save_audio(example_pm, example_file)
