@@ -189,7 +189,7 @@ def create_sequences(
 
     # `flat_map` flattens the" dataset of datasets" into a dataset of tensors
     flatten = lambda x: x.batch(seq_length, drop_remainder=True)
-    sequences = windows.flat_map(flatten) # now we have sequences starting with one less the further you go
+    sequences = windows.flat_map(flatten)  # now we have sequences starting with one less the further you go
 
     # Normalize note pitch
     def scale_pitch(x):
@@ -218,22 +218,29 @@ def mse_with_positive_pressure(y_true: tf.Tensor, y_pred: tf.Tensor):
 def predict_next_note(
         notes: np.ndarray,
         keras_model: tf.keras.Model,
-        temperature: float = 1.0) -> (int, float, float):
+        temperature: dir = {"pitch": 1.0, "duration": 1.0, "step": 1.0}) -> (int, float, float):
     """Generates a note IDs using a trained sequence model."""
 
-    if temperature <= 0:
-        raise ValueError("Temperature must be >0!")
+    for key, value in temperature.items():
+        if value <= 0:
+            raise ValueError(f"{key} temperature must be >0!")
 
     # Add batch dimension
     inputs = tf.expand_dims(notes, 0)
 
     predictions = keras_model.predict(inputs)
     pitch_logits = predictions['pitch']
-    step = predictions['step']
-    duration = predictions['duration']
-
-    pitch_logits /= temperature
+    step_logits = predictions['step']
+    duration_logits = predictions['duration']
+    print(pitch_logits)
+    print(duration_logits)
+    print(step_logits)
+    pitch_logits /= temperature["pitch"]
+    duration_logits /= temperature["duration"]
+    step_logits /= temperature["step"]
     pitch = tf.random.categorical(pitch_logits, num_samples=1)
+    duration = tf.random.categorical(duration_logits, num_samples=1)
+    step = tf.random.categorical(step_logits, num_samples=1)
     pitch = tf.squeeze(pitch, axis=-1)
     duration = tf.squeeze(duration, axis=-1)
     step = tf.squeeze(step, axis=-1)
@@ -250,7 +257,7 @@ def predict_next_note(
 
 
 def train():
-    num_files = 50
+    num_files = 20
     print("Selected Files: ", filenames[:num_files], "Len:", len(filenames[:num_files]))
 
     # pack all notes of the selected files together
@@ -264,6 +271,7 @@ def train():
     print('Number of notes parsed:', n_notes)
 
     key_order = ['pitch', 'step', 'duration']
+    print([all_notes['step']])
     train_notes = np.stack([all_notes[key] for key in key_order], axis=1)  # turn array into key_order
 
     notes_ds = tf.data.Dataset.from_tensor_slices(train_notes)  # just another data format
@@ -316,7 +324,7 @@ def train():
     model.compile(
         loss=loss,
         loss_weights={
-            'pitch': 1.0,  # 0.05
+            'pitch': 0.05,  # 0.05
             'step': 1.0,
             'duration': 1.0,
         },
@@ -334,7 +342,7 @@ def train():
             verbose=1,
             restore_best_weights=True),
     ]
-    epochs = 50
+    epochs = 25
 
     history = model.fit(
         train_ds,
@@ -348,7 +356,7 @@ def train():
     plt.show()
 
     # Generate Notes
-    temperature = 2.0
+    temperature = {"pitch": 4, "duration": 4, "step": 4} # 2.0
     num_predictions = 120
     sample_file = filenames[42]
     raw_notes = midi_to_notes(sample_file)
