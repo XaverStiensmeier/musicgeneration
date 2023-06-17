@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # Sampling rate for audio playback
 _SAMPLING_RATE = 16000
 pretty_midi.pretty_midi.MAX_TICK = 1e10
-
+Q = "Q2"
 
 def get_music_by_emotion(emotion, toptag=True):
     df = pd.read_csv('data/YM2413-MDB-v1.0.2/emotion_annotation/verified_annotation_old.csv', delimiter=',')
@@ -180,25 +180,26 @@ def create_sequences(
         seq_length: int,
         vocab_size=128,
 ) -> tf.data.Dataset:
-    seq_length = seq_length + 1
+    seq_length = seq_length + 1  # for labels
 
-    # Take 1 extra for the labels
+    # See https://www.tensorflow.org/api_docs/python/tf/data/Dataset#window
+    # creates windows of seq_length where the first element is the second element in the element before
     windows = dataset.window(seq_length, shift=1, stride=1,
-                             drop_remainder=True)
+                             drop_remainder=True)  # first element of a line is k*shift; following elem is +stride
 
     # `flat_map` flattens the" dataset of datasets" into a dataset of tensors
     flatten = lambda x: x.batch(seq_length, drop_remainder=True)
-    sequences = windows.flat_map(flatten)
+    sequences = windows.flat_map(flatten) # now we have sequences starting with one less the further you go
 
     # Normalize note pitch
     def scale_pitch(x):
-        x = x / [vocab_size, 1.0, 1.0]
+        x = x / [vocab_size, 1.0, 1.0]  # divide pitch by vocab size
         return x
 
     # Split the labels
     def split_labels(sequences):
-        inputs = sequences[:-1]
-        labels_dense = sequences[-1]
+        inputs = sequences[:-1]  # take everything but last element of a sequence as input
+        labels_dense = sequences[-1]  # take last element of a sequence as label
         key_order = ['pitch', 'step', 'duration']
         labels = {key: labels_dense[i] for i, key in enumerate(key_order)}
         return scale_pitch(inputs), labels
@@ -208,7 +209,9 @@ def create_sequences(
 
 def mse_with_positive_pressure(y_true: tf.Tensor, y_pred: tf.Tensor):
     mse = (y_true - y_pred) ** 2
-    positive_pressure = 10 * tf.maximum(-y_pred, 0.0)
+    positive_pressure_strength = 10
+    positive_pressure = positive_pressure_strength * tf.maximum(-y_pred, 0.0)
+    # it's called reduce because it reduces multiple values to one by applying mean
     return tf.reduce_mean(mse + positive_pressure)
 
 
@@ -218,7 +221,8 @@ def predict_next_note(
         temperature: float = 1.0) -> (int, float, float):
     """Generates a note IDs using a trained sequence model."""
 
-    assert temperature > 0
+    if temperature <= 0:
+        raise ValueError("Temperature must be >0!")
 
     # Add batch dimension
     inputs = tf.expand_dims(notes, 0)
@@ -235,30 +239,36 @@ def predict_next_note(
     step = tf.squeeze(step, axis=-1)
 
     # `step` and `duration` values should be non-negative
+    if step < 0:
+        print(f"Step <0 during prediction!")
     step = tf.maximum(0, step)
+    if duration < 0:
+        print(f"Duration <0 during prediction!")
     duration = tf.maximum(0, duration)
 
     return int(pitch), float(step), float(duration)
 
 
 def train():
-    num_files = 5
-    print(filenames[:num_files])
+    num_files = 50
+    print("Selected Files: ", filenames[:num_files], "Len:", len(filenames[:num_files]))
+
+    # pack all notes of the selected files together
     all_notes = []
     for f in filenames[:num_files]:
         notes = midi_to_notes(f)
-        print(notes)
         all_notes.append(notes)
-    all_notes = pd.concat(all_notes)
+    all_notes = pd.concat(all_notes)  # basically turns it into one big song
+
     n_notes = len(all_notes)
     print('Number of notes parsed:', n_notes)
 
     key_order = ['pitch', 'step', 'duration']
-    train_notes = np.stack([all_notes[key] for key in key_order], axis=1)
+    train_notes = np.stack([all_notes[key] for key in key_order], axis=1)  # turn array into key_order
 
-    notes_ds = tf.data.Dataset.from_tensor_slices(train_notes)
+    notes_ds = tf.data.Dataset.from_tensor_slices(train_notes)  # just another data format
     seq_length = 25
-    vocab_size = 128
+    vocab_size = 128  # maximum for pretty_midi
     seq_ds = create_sequences(notes_ds, seq_length, vocab_size)
     for seq, target in seq_ds.take(1):
         print('sequence shape:', seq.shape)
@@ -299,14 +309,14 @@ def train():
 
     model.compile(loss=loss, optimizer=optimizer)
 
-    model.summary()
+    model.summary()  # prints model summary
 
     losses = model.evaluate(train_ds, return_dict=True)
 
     model.compile(
         loss=loss,
         loss_weights={
-            'pitch': 0.05,  # 0.05
+            'pitch': 1.0,  # 0.05
             'step': 1.0,
             'duration': 1.0,
         },
@@ -324,12 +334,14 @@ def train():
             verbose=1,
             restore_best_weights=True),
     ]
-    epochs = 25
+    epochs = 50
 
     history = model.fit(
         train_ds,
         epochs=epochs,
         callbacks=callbacks,
+        # shuffle=True,
+
     )
 
     plt.plot(history.epoch, history.history['loss'], label='total loss')
@@ -371,7 +383,7 @@ def train():
         instrument = pm.instruments[0]
         instrument_name = pretty_midi.program_to_instrument_name(instrument.program)
 
-        example_file = f"example_{x}.midi"
+        example_file = f"{Q}_example_{x}_{datetime.datetime.now().strftime('%H:%M:%S')}.midi"
         example_pm = notes_to_midi(
             generated_notes, out_file=example_file, instrument_name=instrument_name)
         save_audio(example_pm, example_file)
@@ -396,7 +408,6 @@ if __name__ == '__main__':
         )
     # filenames = glob.glob(str(maestro / '**/*.mid*'))
     # filenames = get_music_by_emotion("tense")
-    Q = "Q1"
     filenames = glob.glob(f"data/EMOPIA_1.0/midis/{Q}*")
     # do_stuff()
     train()
