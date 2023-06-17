@@ -23,9 +23,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # Sampling rate for audio playback
 _SAMPLING_RATE = 16000
 pretty_midi.pretty_midi.MAX_TICK = 1e10
-Q = "Q2"
 
-def get_music_by_emotion(emotion, toptag=True):
+
+def get_music_by_emotion(emotion, toptag=True):  # ONLY FOR YM2413 DATABASE
     df = pd.read_csv('data/YM2413-MDB-v1.0.2/emotion_annotation/verified_annotation_old.csv', delimiter=',')
 
     # Filter DataFrame based on emotion
@@ -209,7 +209,7 @@ def create_sequences(
 
 def mse_with_positive_pressure(y_true: tf.Tensor, y_pred: tf.Tensor):
     mse = (y_true - y_pred) ** 2
-    positive_pressure_strength = 10
+    positive_pressure_strength = 15
     positive_pressure = positive_pressure_strength * tf.maximum(-y_pred, 0.0)
     # it's called reduce because it reduces multiple values to one by applying mean
     return tf.reduce_mean(mse + positive_pressure)
@@ -249,8 +249,8 @@ def predict_next_note(
     return int(pitch), float(step), float(duration)
 
 
-def train():
-    num_files = 50
+def train(identifier):
+    num_files = 5
     print("Selected Files: ", filenames[:num_files], "Len:", len(filenames[:num_files]))
 
     # pack all notes of the selected files together
@@ -316,7 +316,7 @@ def train():
     model.compile(
         loss=loss,
         loss_weights={
-            'pitch': 1.0,  # 0.05
+            'pitch': 0.05,  # 0.05
             'step': 1.0,
             'duration': 1.0,
         },
@@ -334,13 +334,13 @@ def train():
             verbose=1,
             restore_best_weights=True),
     ]
-    epochs = 50
+    epochs = 25
 
     history = model.fit(
         train_ds,
         epochs=epochs,
         callbacks=callbacks,
-        # shuffle=True,
+        # shuffle=True,  # already shuffled before
 
     )
 
@@ -364,6 +364,7 @@ def train():
         prev_start = 0
         for _ in range(num_predictions):
             pitch, step, duration = predict_next_note(input_notes, model, temperature)
+            print(pitch, step, duration)
             start = prev_start + step
             end = start + duration
             input_note = (pitch, step, duration)
@@ -383,7 +384,7 @@ def train():
         instrument = pm.instruments[0]
         instrument_name = pretty_midi.program_to_instrument_name(instrument.program)
 
-        example_file = f"{Q}_example_{x}_{datetime.datetime.now().strftime('%H:%M:%S')}.midi"
+        example_file = f"{identifier}_example_{datetime.datetime.now().strftime('%H:%M:%S')}_{x}.midi"
         example_pm = notes_to_midi(
             generated_notes, out_file=example_file, instrument_name=instrument_name)
         save_audio(example_pm, example_file)
@@ -408,8 +409,9 @@ if __name__ == '__main__':
         )
     # filenames = glob.glob(str(maestro / '**/*.mid*'))
     # filenames = get_music_by_emotion("tense")
-    filenames = glob.glob(f"data/EMOPIA_1.0/midis/{Q}*")
-    # do_stuff()
-    train()
+    for Q in ["Q2"]:  # , "Q2", "Q3", "Q4"]:
+        filenames = glob.glob(f"data/EMOPIA_1.0/midis/{Q}*")
+        # do_stuff()
+        train(Q)
 
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/
