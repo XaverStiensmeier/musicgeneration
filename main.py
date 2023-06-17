@@ -36,6 +36,7 @@ def get_music_by_emotion(emotion, toptag=True):
 
     # wav to midi
     fnames = [f"data/YM2413-MDB-v1.0.2/midi/adjust_tempo_remove_delayed_inst/{name[:-3]}mid" for name in filtered_data['fname']]
+    print([name.split("/")[-1] for name in fnames])
     print(len(fnames))
     return fnames
 
@@ -134,15 +135,8 @@ def midi_to_notes(midi_file: str) -> pd.DataFrame:
     return pd.DataFrame({name: np.array(value) for name, value in notes.items()})
 
 
-def do_stuff():
-    print('Number of files:', len(filenames))
-    sample_file = filenames[1]
-    print(sample_file)
-
-    # play sample file
-    pm = pretty_midi.PrettyMIDI(sample_file)
-    # display_audio(pm)
-    save_audio(pm)
+def analyze(file):
+    pm = pretty_midi.PrettyMIDI(file)
 
     # get number of instruments
     print('Number of instruments:', len(pm.instruments))
@@ -158,13 +152,12 @@ def do_stuff():
               f' duration={duration:.4f}')
 
     # get note data
-    raw_notes = midi_to_notes(sample_file)
-    raw_notes.head()
+    raw_notes = midi_to_notes(file)
 
     # get node names instead of pitches
     get_note_names = np.vectorize(pretty_midi.note_number_to_name)
     sample_note_names = get_note_names(raw_notes['pitch'])
-    sample_note_names[:10]
+    print(sample_note_names[:20])
 
     # plot 100 notes
     plot_piano_roll(raw_notes, count=100)
@@ -313,7 +306,7 @@ def train():
     model.compile(
         loss=loss,
         loss_weights={
-            'pitch': 1.0,  # 0.05
+            'pitch': 0.05,  # 0.05
             'step': 1.0,
             'duration': 1.0,
         },
@@ -393,16 +386,18 @@ if __name__ == '__main__':
     tf.random.set_seed(seed)
     np.random.seed(seed)
 
-    data_dir = pathlib.Path('data/maestro-v2.0.0')
-    if not data_dir.exists():
+    maestro = pathlib.Path('data/maestro-v2.0.0')
+    if not maestro.exists():
         tf.keras.utils.get_file(
             'maestro-v2.0.0-midi.zip',
             origin='https://storage.googleapis.com/magentadata/datasets/maestro/v2.0.0/maestro-v2.0.0-midi.zip',
             extract=True,
             cache_dir='.', cache_subdir='data',
         )
-    filenames = glob.glob(str(data_dir / '**/*.mid*'))
+    # filenames = glob.glob(str(maestro / '**/*.mid*'))
     # filenames = get_music_by_emotion("tense")
+    Q = "Q1"
+    filenames = glob.glob(f"data/EMOPIA_1.0/midis/{Q}*")
     # do_stuff()
     train()
 

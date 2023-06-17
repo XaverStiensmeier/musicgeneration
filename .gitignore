@@ -185,5 +185,6 @@ fabric.properties
 .idea
 training_checkpoints/
 # Custom
+*.midi
 data/
 .midi
