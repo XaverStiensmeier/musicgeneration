@@ -15,6 +15,7 @@ import pandas as pd
 import pretty_midi
 import seaborn as sns
 import tensorflow as tf
+import os
 
 from IPython import display
 from matplotlib import pyplot as plt
@@ -23,6 +24,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # Sampling rate for audio playback
 _SAMPLING_RATE = 16000
 pretty_midi.pretty_midi.MAX_TICK = 1e10
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 
 def get_music_by_emotion(emotion, toptag=True):  # ONLY FOR YM2413 DATABASE
@@ -250,7 +252,7 @@ def predict_next_note(
 
 
 def train(identifier):
-    num_files = 5
+    num_files = 15
     print("Selected Files: ", filenames[:num_files], "Len:", len(filenames[:num_files]))
 
     # pack all notes of the selected files together
@@ -311,8 +313,6 @@ def train(identifier):
 
     model.summary()  # prints model summary
 
-    losses = model.evaluate(train_ds, return_dict=True)
-
     model.compile(
         loss=loss,
         loss_weights={
@@ -322,7 +322,6 @@ def train(identifier):
         },
         optimizer=optimizer,
     )
-    model.evaluate(train_ds, return_dict=True)
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -335,7 +334,7 @@ def train(identifier):
             restore_best_weights=True),
     ]
     epochs = 25
-
+    print("LOSS BEFORE", model.evaluate)
     history = model.fit(
         train_ds,
         epochs=epochs,
@@ -343,14 +342,14 @@ def train(identifier):
         # shuffle=True,  # already shuffled before
 
     )
-
+    print("LOSS AFTER", model.evaluate)
     plt.plot(history.epoch, history.history['loss'], label='total loss')
     plt.show()
 
     # Generate Notes
     temperature = 2.0
     num_predictions = 120
-    sample_file = filenames[42]
+    sample_file = filenames[0]
     raw_notes = midi_to_notes(sample_file)
     sample_notes = np.stack([raw_notes[key] for key in key_order], axis=1)
 
@@ -364,7 +363,6 @@ def train(identifier):
         prev_start = 0
         for _ in range(num_predictions):
             pitch, step, duration = predict_next_note(input_notes, model, temperature)
-            print(pitch, step, duration)
             start = prev_start + step
             end = start + duration
             input_note = (pitch, step, duration)
@@ -409,9 +407,9 @@ if __name__ == '__main__':
         )
     # filenames = glob.glob(str(maestro / '**/*.mid*'))
     # filenames = get_music_by_emotion("tense")
-    for Q in ["Q2"]:  # , "Q2", "Q3", "Q4"]:
-        filenames = glob.glob(f"data/EMOPIA_1.0/midis/{Q}*")
+    for identifier in ["Q1"]:  # , "Q2", "Q3", "Q4"]:
+        filenames = glob.glob(f"data/EMOPIA_1.0/midis/{identifier}*")
         # do_stuff()
-        train(Q)
+        train(identifier)
 
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/
