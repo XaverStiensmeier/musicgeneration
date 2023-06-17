@@ -254,6 +254,7 @@ def train():
     all_notes = []
     for f in filenames[:num_files]:
         notes = midi_to_notes(f)
+        print(notes)
         all_notes.append(notes)
     all_notes = pd.concat(all_notes)
     n_notes = len(all_notes)
@@ -344,7 +345,7 @@ def train():
     # Generate Notes
     temperature = 2.0
     num_predictions = 120
-    sample_file = filenames[142]
+    sample_file = filenames[42]
     raw_notes = midi_to_notes(sample_file)
     sample_notes = np.stack([raw_notes[key] for key in key_order], axis=1)
 
@@ -400,8 +401,8 @@ if __name__ == '__main__':
             extract=True,
             cache_dir='.', cache_subdir='data',
         )
-    # filenames = glob.glob(str(data_dir / '**/*.mid*'))
-    filenames = get_music_by_emotion("tense")
+    filenames = glob.glob(str(data_dir / '**/*.mid*'))
+    # filenames = get_music_by_emotion("tense")
     # do_stuff()
     train()
 
