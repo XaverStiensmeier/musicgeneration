@@ -16,6 +16,7 @@ import pretty_midi
 import seaborn as sns
 import tensorflow as tf
 import os
+import seaborn as sb
 
 from IPython import display
 from matplotlib import pyplot as plt
@@ -24,7 +25,66 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # Sampling rate for audio playback
 _SAMPLING_RATE = 16000
 pretty_midi.pretty_midi.MAX_TICK = 1e10
+LOSS_WEIGHTS = {
+                'pitch': 0.05,  # 0.05
+                'step': 0,
+                'duration': 1.0,
+            }
+KEY_ORDER = ['pitch', 'step', 'duration']
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+
+class GetWeights(tf.keras.callbacks.Callback):  # Not Used
+    #  https://stackoverflow.com/questions/70133704/how-to-get-weight-in-each-layer-and-epoch-then-save-in-file#answer-70136833
+    def __init__(self):
+        super(GetWeights, self).__init__()
+        self.weight_dict = {}
+
+    def on_epoch_end(self, epoch, logs=None):
+        drop_out_index = 2
+        for i, layer in enumerate(self.model.layers):
+            if layer.weights and drop_out_index != i:
+                w = layer.get_weights()[0]
+                b = layer.get_weights()[1]
+                # heat_map = sb.heatmap(w)
+                # plt.show()
+                print('Layer %s has weights of shape %s and biases of shape %s' % (i, np.shape(w), np.shape(b)))
+                if epoch == 0:
+                    # create array to hold weights and biases
+                    self.weight_dict['w_' + str(i + 1)] = w
+                    self.weight_dict['b_' + str(i + 1)] = b
+                else:
+                    # append new weights to previously-created weights array
+                    self.weight_dict['w_' + str(i + 1)] = np.dstack(
+                        (self.weight_dict['w_' + str(i + 1)], w))
+                    # append new weights to previously-created weights array
+                    self.weight_dict['b_' + str(i + 1)] = np.dstack(
+                        (self.weight_dict['b_' + str(i + 1)], b))
+
+
+class GradientPlotCallback(tf.keras.callbacks.Callback):  # Not Working
+    def __init__(self):
+        self.gradients = []
+
+    def on_train_batch_end(self, batch, logs=None):
+        with tf.GradientTape() as tape:
+            loss_tensor = tf.convert_to_tensor(logs['loss'])
+            gradients = tape.gradient(loss_tensor, self.model.trainable_weights)
+            self.gradients.append([tf.reduce_mean(g).numpy() for g in gradients])
+
+    def on_epoch_end(self, epoch, logs=None):
+        if (epoch + 1) % 5 == 0:  # Plot gradients every 5 epochs
+            self.plot_gradients()
+
+    def plot_gradients(self):
+        plt.figure(figsize=(10, 5))
+        for i, grad in enumerate(self.gradients):
+            plt.plot(grad, label=f'Layer {i+1}')
+        plt.xlabel('Batch')
+        plt.ylabel('Gradient')
+        plt.title('Gradient Magnitude per Layer')
+        plt.legend()
+        plt.show()
 
 
 def get_music_by_emotion(emotion, toptag=True):  # ONLY FOR YM2413 DATABASE
@@ -37,7 +97,8 @@ def get_music_by_emotion(emotion, toptag=True):  # ONLY FOR YM2413 DATABASE
         filtered_data = df[df['verified_tags'].str.contains(emotion)]
 
     # wav to midi
-    fnames = [f"data/YM2413-MDB-v1.0.2/midi/adjust_tempo_remove_delayed_inst/{name[:-3]}mid" for name in filtered_data['fname']]
+    fnames = [f"data/YM2413-MDB-v1.0.2/midi/adjust_tempo_remove_delayed_inst/{name[:-3]}mid" for name in
+              filtered_data['fname']]
     print([name.split("/")[-1] for name in fnames])
     print(len(fnames))
     return fnames
@@ -189,9 +250,9 @@ def create_sequences(
     windows = dataset.window(seq_length, shift=1, stride=1,
                              drop_remainder=True)  # first element of a line is k*shift; following elem is +stride
 
-    # `flat_map` flattens the" dataset of datasets" into a dataset of tensors
+    # `flat_map` flattens the" dataset of datasets" into batches of tensors
     flatten = lambda x: x.batch(seq_length, drop_remainder=True)
-    sequences = windows.flat_map(flatten) # now we have sequences starting with one less the further you go
+    sequences = windows.flat_map(flatten)  # now we have sequences starting with one less the further you go
 
     # Normalize note pitch
     def scale_pitch(x):
@@ -202,8 +263,7 @@ def create_sequences(
     def split_labels(sequences):
         inputs = sequences[:-1]  # take everything but last element of a sequence as input
         labels_dense = sequences[-1]  # take last element of a sequence as label
-        key_order = ['pitch', 'step', 'duration']
-        labels = {key: labels_dense[i] for i, key in enumerate(key_order)}
+        labels = {key: labels_dense[i] for i, key in enumerate(KEY_ORDER)}
         return scale_pitch(inputs), labels
 
     return sequences.map(split_labels, num_parallel_calls=tf.data.AUTOTUNE)
@@ -251,8 +311,49 @@ def predict_next_note(
     return int(pitch), float(step), float(duration)
 
 
-def train(identifier):
-    num_files = 15
+def plot_gradients(gradients):
+    plt.figure(figsize=(10, 5))
+    for i, grad in enumerate(gradients):
+        plt.plot(grad, label=f'Layer {i+1}')
+    plt.xlabel('Epoch')
+    plt.ylabel('Gradient')
+    plt.title('Gradient Magnitude per Layer')
+    plt.legend()
+    plt.show()
+
+
+def generate_notes(model, input_notes, instrument_name, temperature=2.0, num_predictions=240, file_name=None):
+    # Generate Notes
+
+    # The initial sequence of notes; pitch is normalized similar to training sequences
+
+    for x in range(1):
+        generated_notes = []
+        prev_start = 0
+        for _ in range(num_predictions):
+            pitch, step, duration = predict_next_note(input_notes, model, temperature)
+            start = prev_start + step
+            end = start + duration
+            input_note = (pitch, step, duration)
+            generated_notes.append((*input_note, start, end))
+            input_notes = np.delete(input_notes, 0, axis=0)
+            input_notes = np.append(input_notes, np.expand_dims(input_note, 0), axis=0)
+            prev_start = start
+
+        generated_notes = pd.DataFrame(
+            generated_notes, columns=(*KEY_ORDER, 'start', 'end'))
+
+        example_file = f"{identifier}_example_{datetime.datetime.now().strftime('%H:%M:%S')}_{x}.midi"
+        example_pm = notes_to_midi(
+            generated_notes, out_file=example_file, instrument_name=instrument_name)
+        save_audio(example_pm, example_file)
+
+        plot_piano_roll(generated_notes)
+        plot_distributions(generated_notes)
+
+
+def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, loss_weights=LOSS_WEIGHTS,
+          num_files=15, model=None):
     print("Selected Files: ", filenames[:num_files], "Len:", len(filenames[:num_files]))
 
     # pack all notes of the selected files together
@@ -265,12 +366,10 @@ def train(identifier):
     n_notes = len(all_notes)
     print('Number of notes parsed:', n_notes)
 
-    key_order = ['pitch', 'step', 'duration']
-    train_notes = np.stack([all_notes[key] for key in key_order], axis=1)  # turn array into key_order
+    train_notes = np.stack([all_notes[key] for key in KEY_ORDER], axis=1)  # turn array into key_order
 
     notes_ds = tf.data.Dataset.from_tensor_slices(train_notes)  # just another data format
-    seq_length = 25
-    vocab_size = 128  # maximum for pretty_midi
+    vocab_size = 128  # 128 is maximum pitch range for pretty_midi
     seq_ds = create_sequences(notes_ds, seq_length, vocab_size)
     for seq, target in seq_ds.take(1):
         print('sequence shape:', seq.shape)
@@ -285,43 +384,40 @@ def train(identifier):
                 .batch(batch_size, drop_remainder=True)
                 .cache()
                 .prefetch(tf.data.experimental.AUTOTUNE))
+    if not model:
+        input_shape = (seq_length, 3)
 
-    input_shape = (seq_length, 3)
-    learning_rate = 0.005
+        inputs = tf.keras.Input(input_shape)
+        x = tf.keras.layers.LSTM(128)(inputs)
+        x = tf.keras.layers.Dropout(0.3)(x)
+        outputs = {
+            'pitch': tf.keras.layers.Dense(128, name='pitch')(x),
+            'step': tf.keras.layers.Dense(1, name='step')(x),
+            'duration': tf.keras.layers.Dense(1, name='duration')(x),
+        }
 
-    inputs = tf.keras.Input(input_shape)
-    x = tf.keras.layers.LSTM(128)(inputs)
+        model = tf.keras.Model(inputs, outputs)
 
-    outputs = {
-        'pitch': tf.keras.layers.Dense(128, name='pitch')(x),
-        'step': tf.keras.layers.Dense(1, name='step')(x),
-        'duration': tf.keras.layers.Dense(1, name='duration')(x),
-    }
+        loss = {
+            'pitch': tf.keras.losses.SparseCategoricalCrossentropy(
+                from_logits=True),
+            'step': mse_with_positive_pressure,
+            'duration': mse_with_positive_pressure,
+        }
 
-    model = tf.keras.Model(inputs, outputs)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        model.compile(loss=loss, optimizer=optimizer)
 
-    loss = {
-        'pitch': tf.keras.losses.SparseCategoricalCrossentropy(
-            from_logits=True),
-        'step': mse_with_positive_pressure,
-        'duration': mse_with_positive_pressure,
-    }
+        model.summary()  # prints model summary
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+        model.compile(
+            loss=loss,
+            loss_weights=loss_weights,
+            optimizer=optimizer,
+        )
 
-    model.compile(loss=loss, optimizer=optimizer)
-
-    model.summary()  # prints model summary
-
-    model.compile(
-        loss=loss,
-        loss_weights={
-            'pitch': 0.05,  # 0.05
-            'step': 1.0,
-            'duration': 1.0,
-        },
-        optimizer=optimizer,
-    )
+    # gw = GetWeights()
+    # gradient_callback = GradientPlotCallback()
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -333,7 +429,6 @@ def train(identifier):
             verbose=1,
             restore_best_weights=True),
     ]
-    epochs = 25
     print("LOSS BEFORE", model.evaluate)
     history = model.fit(
         train_ds,
@@ -342,53 +437,23 @@ def train(identifier):
         # shuffle=True,  # already shuffled before
 
     )
-    print("LOSS AFTER", model.evaluate)
+    # print("LOSS AFTER", model.evaluate)
     plt.plot(history.epoch, history.history['loss'], label='total loss')
     plt.show()
 
-    # Generate Notes
-    temperature = 2.0
-    num_predictions = 120
-    sample_file = filenames[0]
-    raw_notes = midi_to_notes(sample_file)
-    sample_notes = np.stack([raw_notes[key] for key in key_order], axis=1)
+    model.save(f"{identifier}_{datetime.datetime.now().strftime('%H:%M:%S')}_.model")
 
-    # The initial sequence of notes; pitch is normalized similar to training
-    # sequences
-    input_notes = (
-            sample_notes[:seq_length] / np.array([vocab_size, 1, 1]))
-
-    for x in range(2):
-        generated_notes = []
-        prev_start = 0
-        for _ in range(num_predictions):
-            pitch, step, duration = predict_next_note(input_notes, model, temperature)
-            start = prev_start + step
-            end = start + duration
-            input_note = (pitch, step, duration)
-            generated_notes.append((*input_note, start, end))
-            input_notes = np.delete(input_notes, 0, axis=0)
-            input_notes = np.append(input_notes, np.expand_dims(input_note, 0), axis=0)
-            prev_start = start
-
-        generated_notes = pd.DataFrame(
-            generated_notes, columns=(*key_order, 'start', 'end'))
-
-        get_note_names = np.vectorize(pretty_midi.note_number_to_name)
-        sample_note_names = get_note_names(raw_notes['pitch'])
-        print(sample_note_names[:10])
-
-        pm = pretty_midi.PrettyMIDI(sample_file)
-        instrument = pm.instruments[0]
-        instrument_name = pretty_midi.program_to_instrument_name(instrument.program)
-
-        example_file = f"{identifier}_example_{datetime.datetime.now().strftime('%H:%M:%S')}_{x}.midi"
-        example_pm = notes_to_midi(
-            generated_notes, out_file=example_file, instrument_name=instrument_name)
-        save_audio(example_pm, example_file)
-
-        plot_piano_roll(generated_notes)
-        plot_distributions(generated_notes)
+    base_file = filenames[0]
+    print("Base File: " + base_file)
+    raw_notes = midi_to_notes(base_file)
+    pm = pretty_midi.PrettyMIDI(base_file)
+    instrument = pm.instruments[0]
+    instrument_name = pretty_midi.program_to_instrument_name(instrument.program)
+    sample_notes = np.stack([raw_notes[key] for key in KEY_ORDER], axis=1)
+    generate_notes(model=model,
+                   input_notes=(sample_notes[:seq_length] / np.array([vocab_size, 1, 1])),
+                   instrument_name=instrument_name)
+    return model
 
 
 # Press the green button in the gutter to run the script.
@@ -405,11 +470,14 @@ if __name__ == '__main__':
             extract=True,
             cache_dir='.', cache_subdir='data',
         )
+    filenames = []
     # filenames = glob.glob(str(maestro / '**/*.mid*'))
     # filenames = get_music_by_emotion("tense")
-    for identifier in ["Q1"]:  # , "Q2", "Q3", "Q4"]:
-        filenames = glob.glob(f"data/EMOPIA_1.0/midis/{identifier}*")
+    for identifier in ["Q2"]:  # , "Q2", "Q3", "Q4"]:
+        filenames += glob.glob(f"data/EMOPIA_1.0/midis/{identifier}*")
         # do_stuff()
-        train(identifier)
+        first_model = train(identifier, filenames)
+        filenames = glob.glob(str(maestro / '**/*.mid*'))
+        second_model = train(identifier, filenames[:2])
 
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/
