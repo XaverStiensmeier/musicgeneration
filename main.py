@@ -8,6 +8,7 @@ import pathlib
 import pretty_midi
 import tensorflow as tf
 import os
+import argparse
 
 from analyze import midi_to_notes, plot_notes, plot_distributions, plot_loss
 
@@ -15,8 +16,8 @@ from analyze import midi_to_notes, plot_notes, plot_distributions, plot_loss
 _SAMPLING_RATE = 16000
 pretty_midi.pretty_midi.MAX_TICK = 1e10
 LOSS_WEIGHTS = {
-    'pitch': 0.053,  # 0.05
-    'step': 1.0,  # 1.0
+    'pitch': 0.056,  # 0.05
+    'step': 1.5,  # 1.0
     'duration': 1.0,  # 1.0
 }
 KEY_ORDER = ['pitch', 'step', 'duration']
@@ -25,6 +26,18 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 POSITIVE_PRESSURE_STRENGTH = 15
 VOCAB_SIZE = 128
 MAESTRO = pathlib.Path('data/maestro-v2.0.0')
+EMOPIA = pathlib.Path('data/EMOPIA_1.0')
+
+parser = argparse.ArgumentParser(
+    prog='GenerateMusic',
+    description='Generates Music based on file input')
+
+parser.add_argument('-m', '--model', type=str, help="Take a model path. If defined, no model will be trained, "
+                                                    "but a music piece generated. Requires file.")
+parser.add_argument('-f', '--file', type=str, help="File to read input sequence from for music generation")
+parser.add_argument('-s', '--sequence_length', type=int, help="Length of sequence to read from file. "
+                                                              "Should be <= training sequence length")
+args = parser.parse_args()
 
 
 def check_dataset_existence():
@@ -37,6 +50,15 @@ def check_dataset_existence():
         tf.keras.utils.get_file(
             'maestro-v2.0.0-midi.zip',
             origin='https://storage.googleapis.com/magentadata/datasets/maestro/v2.0.0/maestro-v2.0.0-midi.zip',
+            extract=True,
+            cache_dir='.', cache_subdir='data',
+        )
+
+    if not EMOPIA.exists():  # untested
+        print(f"Downloading {EMOPIA}...")
+        tf.keras.utils.get_file(
+            'EMOPIA_1.0.zip',
+            origin='https://zenodo.org/record/5090631/files/EMOPIA_1.0.zip',
             extract=True,
             cache_dir='.', cache_subdir='data',
         )
@@ -198,10 +220,10 @@ def predict_next_note(
 
 def generate_notes_from_file(model, base_file, seq_length=25):
     """
-
-    :param model:
-    :param base_file:
-    :param seq_length:
+    Generates notes given a file
+    :param model: model that predicts the notes
+    :param base_file: file to read initial sequence from
+    :param seq_length: length of sequence to read from base_file
     :return:
     """
     print("Base File: " + base_file)
@@ -349,34 +371,50 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     seed = 42
-    time = datetime.datetime.now().strftime('%H:%M:%S')
     tf.random.set_seed(seed)
     np.random.seed(seed)
     # filenames = glob.glob(str(maestro / '**/*.mid*'))
     # filenames = get_music_by_emotion("tense")
     seq_length = 50
-    for identifier in ["Q1"]:  # , "Q2", "Q3", "Q4"]:
-        # filenames = glob.glob(str(MAESTRO / '**/*.mid*'))
-        # first_model = train(identifier, filenames, epochs=50, seq_length=seq_length)
-        filenames = glob.glob(f"data/EMOPIA_1.0/midis/{identifier}*")
-        # do_stuff()
-        model = train(identifier, filenames, epochs=1, seq_length=seq_length, num_files=1)
-        instrument_name, generated_notes = generate_notes_from_file(model=model, base_file=filenames[0],
+    if not args.model:
+        for identifier in ["Q1", "Q2", "Q3", "Q4"]:
+            time = datetime.datetime.now().strftime('%H:%M:%S')
+            # filenames = glob.glob(str(MAESTRO / '**/*.mid*'))
+            # first_model = train(identifier, filenames, epochs=50, seq_length=seq_length)
+            filenames = glob.glob(f"data/EMOPIA_1.0/midis/{identifier}*")
+            # do_stuff()
+            model = train(identifier, filenames, epochs=50, seq_length=seq_length, num_files=50, learning_rate=0.005)
+            instrument_name, generated_notes = generate_notes_from_file(model=model, base_file=filenames[0],
+                                                                        seq_length=seq_length)
+            midi_file = FILE_NAME.format(identifier=identifier,
+                                         name="example",
+                                         time=time,
+                                         extension="midi")
+            notes_write_to_midi(
+                generated_notes, out_file=midi_file, instrument_name=instrument_name)
+
+            plot_notes(generated_notes, file_name=FILE_NAME.format(identifier=identifier,
+                                                                   name="plot_notes",
+                                                                   time=time,
+                                                                   extension="png"))
+            plot_distributions(generated_notes, file_name=FILE_NAME.format(identifier=identifier,
+                                                                           name="plot_distributions",
+                                                                           time=time,
+                                                                           extension="png"))
+    elif args.file:
+        model = tf.keras.models.load_model(args.model)
+        instrument_name, generated_notes = generate_notes_from_file(model=model, base_file=args.file,
                                                                     seq_length=seq_length)
-        midi_file = FILE_NAME.format(identifier=identifier,
-                                     name="example",
-                                     time=time,
-                                     extension="midi")
+        midi_file = f"{args.file}_generated.midi"
         notes_write_to_midi(
             generated_notes, out_file=midi_file, instrument_name=instrument_name)
 
-        plot_notes(generated_notes, file_name=FILE_NAME.format(identifier=identifier,
-                                                               name="plot_notes",
-                                                               time=time,
-                                                               extension="png"))
-        plot_distributions(generated_notes, file_name=FILE_NAME.format(identifier=identifier,
-                                                                       name="plot_distributions",
-                                                                       time=time,
-                                                                       extension="png"))
+        plot_notes(generated_notes)
+        plot_distributions(generated_notes)
+    else:
+        print("You need to set a file.")
+
+
+
 
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/
