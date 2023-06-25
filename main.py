@@ -14,7 +14,7 @@ from analyze import midi_to_notes, plot_notes, plot_distributions, plot_loss
 
 # Sampling rate for audio playback
 _SAMPLING_RATE = 16000
-pretty_midi.pretty_midi.MAX_TICK = 1e10
+pretty_midi.pretty_midi.MAX_TICK = 1e10  # needed for broken MIDI files; was primarily necessary for ym2413
 LOSS_WEIGHTS = {
     'pitch': 0.056,  # 0.05
     'step': 1.5,  # 1.0
@@ -37,24 +37,25 @@ parser.add_argument('-m', '--model', type=str, help="Take a model path. If defin
 parser.add_argument('-f', '--file', type=str, help="File to read input sequence from for music generation")
 parser.add_argument('-s', '--sequence_length', type=int, help="Length of sequence to read from file. "
                                                               "Should be <= training sequence length")
+parser.add_argument('-d', '--download', action="store_true", help="If set, data set is downloaded.")
 args = parser.parse_args()
 
 
-def check_dataset_existence():
+def ensure_dataset_existence():
     """
-    Checks if datasets exist. If not, dataset is downloaded.
+    Ensures dataset exists.
     :return:
     """
-    if not MAESTRO.exists():
-        print(f"Downloading {MAESTRO}...")
-        tf.keras.utils.get_file(
-            'maestro-v2.0.0-midi.zip',
-            origin='https://storage.googleapis.com/magentadata/datasets/maestro/v2.0.0/maestro-v2.0.0-midi.zip',
-            extract=True,
-            cache_dir='.', cache_subdir='data',
-        )
+    # if not MAESTRO.exists():
+    #     print(f"Downloading {MAESTRO}...")
+    #     tf.keras.utils.get_file(
+    #         'maestro-v2.0.0-midi.zip',
+    #         origin='https://storage.googleapis.com/magentadata/datasets/maestro/v2.0.0/maestro-v2.0.0-midi.zip',
+    #         extract=True,
+    #         cache_dir='.', cache_subdir='data',
+    #     )
 
-    if not EMOPIA.exists():  # untested
+    if not EMOPIA.exists():
         print(f"Downloading {EMOPIA}...")
         tf.keras.utils.get_file(
             'EMOPIA_1.0.zip',
@@ -92,7 +93,7 @@ def notes_write_to_midi(
         out_file: str,
         instrument_name: str,
         velocity: int = 100,  # note loudness; currently ignored during training. See
-) -> pretty_midi.PrettyMIDI:
+):
     """
     Converts notes to midi file out_file.
     :param notes: notes to write
@@ -122,9 +123,9 @@ def notes_write_to_midi(
     pm.instruments.append(instrument)
 
     sub_dir_name = os.path.dirname(out_file)
-    if not os.path.isdir(sub_dir_name):
+    if sub_dir_name and not os.path.isdir(sub_dir_name):
         dir_name = os.path.dirname(sub_dir_name)
-        if not os.path.isdir(dir_name):
+        if dir_name and not os.path.isdir(dir_name):
             os.mkdir(dir_name)
         os.mkdir(sub_dir_name)
     pm.write(out_file)
@@ -370,12 +371,15 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
+    if args.download:
+        ensure_dataset_existence()
     seed = 42
     tf.random.set_seed(seed)
     np.random.seed(seed)
     # filenames = glob.glob(str(maestro / '**/*.mid*'))
     # filenames = get_music_by_emotion("tense")
     seq_length = 50
+    print(args)
     if not args.model:
         for identifier in ["Q1", "Q2", "Q3", "Q4"]:
             time = datetime.datetime.now().strftime('%H:%M:%S')
@@ -402,15 +406,16 @@ if __name__ == '__main__':
                                                                            time=time,
                                                                            extension="png"))
     elif args.file:
-        model = tf.keras.models.load_model(args.model)
-        instrument_name, generated_notes = generate_notes_from_file(model=model, base_file=args.file,
-                                                                    seq_length=seq_length)
-        midi_file = f"{args.file}_generated.midi"
-        notes_write_to_midi(
-            generated_notes, out_file=midi_file, instrument_name=instrument_name)
+        with tf.keras.utils.custom_object_scope({'mse_with_positive_pressure': mse_with_positive_pressure}):
+            model = tf.keras.models.load_model(args.model)
+            instrument_name, generated_notes = generate_notes_from_file(model=model, base_file=args.file,
+                                                                        seq_length=seq_length)
+            midi_file = f"{os.path.basename(args.file)}_generated.midi"
+            notes_write_to_midi(
+                generated_notes, out_file=midi_file, instrument_name=instrument_name)
 
-        plot_notes(generated_notes)
-        plot_distributions(generated_notes)
+            plot_notes(generated_notes)
+            plot_distributions(generated_notes)
     else:
         print("You need to set a file.")
 

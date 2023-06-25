@@ -125,9 +125,9 @@ def plot_loss(history, file_name=None):
 def save_plt(plt, file_name):
     if file_name:
         sub_dir_name = os.path.dirname(file_name)
-        if not os.path.isdir(sub_dir_name):
+        if sub_dir_name and not os.path.isdir(sub_dir_name):
             dir_name = os.path.dirname(sub_dir_name)
-            if not os.path.isdir(dir_name):
+            if dir_name and not os.path.isdir(dir_name):
                 os.mkdir(dir_name)
             os.mkdir(sub_dir_name)
         plt.savefig(file_name)
