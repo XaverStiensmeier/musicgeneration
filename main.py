@@ -4,90 +4,49 @@
 # Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
 # See https://www.tensorflow.org/tutorials/audio/music_generation
 # Temperature https://www.tensorflow.org/text/tutorials/text_generation
-
-import collections
+import pandas as pd
 import datetime
-import fluidsynth
 import glob
 import numpy as np
 import pathlib
-import pandas as pd
 import pretty_midi
-import seaborn as sns
 import tensorflow as tf
 import os
-import seaborn as sb
 
-from IPython import display
-from matplotlib import pyplot as plt
-from typing import Dict, List, Optional, Sequence, Tuple
+from analyze import midi_to_notes, plot_notes, plot_distributions, plot_loss
 
 # Sampling rate for audio playback
 _SAMPLING_RATE = 16000
 pretty_midi.pretty_midi.MAX_TICK = 1e10
 LOSS_WEIGHTS = {
-                'pitch': 0.05,  # 0.05
-                'step': 0,
-                'duration': 1.0,
-            }
+    'pitch': 0.05,  # 0.05
+    'step': 1.0,  # 1.0
+    'duration': 1.0,  # 1.0
+}
 KEY_ORDER = ['pitch', 'step', 'duration']
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 
-class GetWeights(tf.keras.callbacks.Callback):  # Not Used
-    #  https://stackoverflow.com/questions/70133704/how-to-get-weight-in-each-layer-and-epoch-then-save-in-file#answer-70136833
-    def __init__(self):
-        super(GetWeights, self).__init__()
-        self.weight_dict = {}
-
-    def on_epoch_end(self, epoch, logs=None):
-        drop_out_index = 2
-        for i, layer in enumerate(self.model.layers):
-            if layer.weights and drop_out_index != i:
-                w = layer.get_weights()[0]
-                b = layer.get_weights()[1]
-                # heat_map = sb.heatmap(w)
-                # plt.show()
-                print('Layer %s has weights of shape %s and biases of shape %s' % (i, np.shape(w), np.shape(b)))
-                if epoch == 0:
-                    # create array to hold weights and biases
-                    self.weight_dict['w_' + str(i + 1)] = w
-                    self.weight_dict['b_' + str(i + 1)] = b
-                else:
-                    # append new weights to previously-created weights array
-                    self.weight_dict['w_' + str(i + 1)] = np.dstack(
-                        (self.weight_dict['w_' + str(i + 1)], w))
-                    # append new weights to previously-created weights array
-                    self.weight_dict['b_' + str(i + 1)] = np.dstack(
-                        (self.weight_dict['b_' + str(i + 1)], b))
+def check_dataset_existence():
+    maestro = pathlib.Path('data/maestro-v2.0.0')
+    if not maestro.exists():
+        tf.keras.utils.get_file(
+            'maestro-v2.0.0-midi.zip',
+            origin='https://storage.googleapis.com/magentadata/datasets/maestro/v2.0.0/maestro-v2.0.0-midi.zip',
+            extract=True,
+            cache_dir='.', cache_subdir='data',
+        )
 
 
-class GradientPlotCallback(tf.keras.callbacks.Callback):  # Not Working
-    def __init__(self):
-        self.gradients = []
-
-    def on_train_batch_end(self, batch, logs=None):
-        with tf.GradientTape() as tape:
-            loss_tensor = tf.convert_to_tensor(logs['loss'])
-            gradients = tape.gradient(loss_tensor, self.model.trainable_weights)
-            self.gradients.append([tf.reduce_mean(g).numpy() for g in gradients])
-
-    def on_epoch_end(self, epoch, logs=None):
-        if (epoch + 1) % 5 == 0:  # Plot gradients every 5 epochs
-            self.plot_gradients()
-
-    def plot_gradients(self):
-        plt.figure(figsize=(10, 5))
-        for i, grad in enumerate(self.gradients):
-            plt.plot(grad, label=f'Layer {i+1}')
-        plt.xlabel('Batch')
-        plt.ylabel('Gradient')
-        plt.title('Gradient Magnitude per Layer')
-        plt.legend()
-        plt.show()
-
-
-def get_music_by_emotion(emotion, toptag=True):  # ONLY FOR YM2413 DATABASE
+def get_ym2413_file_names_by_emotion(emotion, toptag=True):  # ONLY FOR YM2413 DATABASE
+    """
+    Gets filenames based on emotion from ym2413. However, MIDI files from that dataset can include larger gaps and
+    are in general atypical.
+    :param emotion: Emotion tag to filter for [cheerful, tense, peaceful, creepy, depressed, comic, serious, touching,
+    speedy, dreamy, cute, grand, exciting, rhythmic, boring, bizarre, frustrating, cold, calm]
+    :param toptag: If true, only check top tag (tag people voted most for).
+    :return:
+    """
     df = pd.read_csv('data/YM2413-MDB-v1.0.2/emotion_annotation/verified_annotation_old.csv', delimiter=',')
 
     # Filter DataFrame based on emotion
@@ -97,18 +56,16 @@ def get_music_by_emotion(emotion, toptag=True):  # ONLY FOR YM2413 DATABASE
         filtered_data = df[df['verified_tags'].str.contains(emotion)]
 
     # wav to midi
-    fnames = [f"data/YM2413-MDB-v1.0.2/midi/adjust_tempo_remove_delayed_inst/{name[:-3]}mid" for name in
-              filtered_data['fname']]
-    print([name.split("/")[-1] for name in fnames])
-    print(len(fnames))
-    return fnames
+    file_names = [f"data/YM2413-MDB-v1.0.2/midi/adjust_tempo_remove_delayed_inst/{name[:-3]}mid" for name in
+                  filtered_data['fname']]
+    return file_names
 
 
 def notes_to_midi(
         notes: pd.DataFrame,
         out_file: str,
         instrument_name: str,
-        velocity: int = 100,  # note loudness
+        velocity: int = 100,  # note loudness; currently ignored during training. See 
 ) -> pretty_midi.PrettyMIDI:
     pm = pretty_midi.PrettyMIDI()
     instrument = pretty_midi.Instrument(
@@ -131,111 +88,6 @@ def notes_to_midi(
     pm.instruments.append(instrument)
     pm.write(out_file)
     return pm
-
-
-def plot_distributions(notes: pd.DataFrame, drop_percentile=2.5):
-    plt.figure(figsize=[15, 5])
-    plt.subplot(1, 3, 1)
-    sns.histplot(notes, x="pitch", bins=20)
-
-    plt.subplot(1, 3, 2)
-    max_step = np.percentile(notes['step'], 100 - drop_percentile)
-    sns.histplot(notes, x="step", bins=np.linspace(0, max_step, 21))
-
-    plt.subplot(1, 3, 3)
-    max_duration = np.percentile(notes['duration'], 100 - drop_percentile)
-    sns.histplot(notes, x="duration", bins=np.linspace(0, max_duration, 21))
-    plt.show()
-
-
-def plot_piano_roll(notes: pd.DataFrame, count: Optional[int] = None):
-    if count:
-        title = f'First {count} notes'
-    else:
-        title = f'Whole track'
-        count = len(notes['pitch'])
-    plt.figure(figsize=(20, 4))
-    plot_pitch = np.stack([notes['pitch'], notes['pitch']], axis=0)
-    plot_start_stop = np.stack([notes['start'], notes['end']], axis=0)
-    plt.plot(
-        plot_start_stop[:, :count], plot_pitch[:, :count], color="b", marker=".")
-    plt.xlabel('Time [s]')
-    plt.ylabel('Pitch')
-    _ = plt.title(title)
-    plt.show()
-
-
-def display_audio(pm: pretty_midi.PrettyMIDI, seconds=30):
-    waveform = pm.fluidsynth(fs=_SAMPLING_RATE)
-    # Take a sample of the generated waveform to mitigate kernel resets
-    waveform_short = waveform[:seconds * _SAMPLING_RATE]
-    return display.Audio(waveform_short, rate=_SAMPLING_RATE)
-
-
-def save_audio(pm: pretty_midi.PrettyMIDI, name='done.mid'):
-    pm.write(name)
-
-
-def midi_to_notes(midi_file: str) -> pd.DataFrame:
-    pm = pretty_midi.PrettyMIDI(midi_file)
-    instrument = pm.instruments[0]
-    notes = collections.defaultdict(list)
-
-    # Sort the notes by start time
-    sorted_notes = sorted(instrument.notes, key=lambda note: note.start)
-    prev_start = sorted_notes[0].start
-
-    for note in sorted_notes:
-        start = note.start
-        end = note.end
-        notes['pitch'].append(note.pitch)
-        notes['start'].append(start)
-        notes['end'].append(end)
-        notes['step'].append(start - prev_start)
-        notes['duration'].append(end - start)
-        prev_start = start
-
-    return pd.DataFrame({name: np.array(value) for name, value in notes.items()})
-
-
-def analyze(file):
-    pm = pretty_midi.PrettyMIDI(file)
-
-    # get number of instruments
-    print('Number of instruments:', len(pm.instruments))
-    instrument = pm.instruments[0]
-    instrument_name = pretty_midi.program_to_instrument_name(instrument.program)
-    print('Instrument name:', instrument_name)
-
-    # extract notes
-    for i, note in enumerate(instrument.notes[:10]):
-        note_name = pretty_midi.note_number_to_name(note.pitch)
-        duration = note.end - note.start
-        print(f'{i}: pitch={note.pitch}, note_name={note_name},'
-              f' duration={duration:.4f}')
-
-    # get note data
-    raw_notes = midi_to_notes(file)
-
-    # get node names instead of pitches
-    get_note_names = np.vectorize(pretty_midi.note_number_to_name)
-    sample_note_names = get_note_names(raw_notes['pitch'])
-    print(sample_note_names[:20])
-
-    # plot 100 notes
-    plot_piano_roll(raw_notes, count=100)
-    # plot all notes
-    plot_piano_roll(raw_notes)
-    # plot node distribution
-    print("Distributions")
-    plot_distributions(raw_notes)
-
-    # write your own midi
-    # example_file = 'example.midi'
-    # example_pm = notes_to_midi(
-    #    raw_notes, out_file=example_file, instrument_name=instrument_name)
-    # display_audio(example_pm)
-    # save_audio(example_pm)
 
 
 def create_sequences(
@@ -311,17 +163,6 @@ def predict_next_note(
     return int(pitch), float(step), float(duration)
 
 
-def plot_gradients(gradients):
-    plt.figure(figsize=(10, 5))
-    for i, grad in enumerate(gradients):
-        plt.plot(grad, label=f'Layer {i+1}')
-    plt.xlabel('Epoch')
-    plt.ylabel('Gradient')
-    plt.title('Gradient Magnitude per Layer')
-    plt.legend()
-    plt.show()
-
-
 def generate_notes(model, input_notes, instrument_name, temperature=2.0, num_predictions=240, file_name=None):
     # Generate Notes
 
@@ -346,9 +187,9 @@ def generate_notes(model, input_notes, instrument_name, temperature=2.0, num_pre
         example_file = f"{identifier}_example_{datetime.datetime.now().strftime('%H:%M:%S')}_{x}.midi"
         example_pm = notes_to_midi(
             generated_notes, out_file=example_file, instrument_name=instrument_name)
-        save_audio(example_pm, example_file)
+        example_pm.write(example_file)
 
-        plot_piano_roll(generated_notes)
+        plot_notes(generated_notes)
         plot_distributions(generated_notes)
 
 
@@ -417,7 +258,7 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
         )
 
     # gw = GetWeights()
-    # gradient_callback = GradientPlotCallback()
+    # gradient_callback = GradientPlotCallback()  # doesn't work
 
     callbacks = [
         tf.keras.callbacks.ModelCheckpoint(
@@ -428,6 +269,7 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
             patience=5,
             verbose=1,
             restore_best_weights=True),
+        # gw,
     ]
     print("LOSS BEFORE", model.evaluate)
     history = model.fit(
@@ -437,9 +279,7 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
         # shuffle=True,  # already shuffled before
 
     )
-    # print("LOSS AFTER", model.evaluate)
-    plt.plot(history.epoch, history.history['loss'], label='total loss')
-    plt.show()
+    plot_loss(history)
 
     model.save(f"{identifier}_{datetime.datetime.now().strftime('%H:%M:%S')}_.model")
 
@@ -462,22 +302,14 @@ if __name__ == '__main__':
     tf.random.set_seed(seed)
     np.random.seed(seed)
 
-    maestro = pathlib.Path('data/maestro-v2.0.0')
-    if not maestro.exists():
-        tf.keras.utils.get_file(
-            'maestro-v2.0.0-midi.zip',
-            origin='https://storage.googleapis.com/magentadata/datasets/maestro/v2.0.0/maestro-v2.0.0-midi.zip',
-            extract=True,
-            cache_dir='.', cache_subdir='data',
-        )
     filenames = []
     # filenames = glob.glob(str(maestro / '**/*.mid*'))
     # filenames = get_music_by_emotion("tense")
-    for identifier in ["Q2"]:  # , "Q2", "Q3", "Q4"]:
+    for identifier in ["Q3"]:  # , "Q2", "Q3", "Q4"]:
         filenames += glob.glob(f"data/EMOPIA_1.0/midis/{identifier}*")
         # do_stuff()
-        first_model = train(identifier, filenames)
-        filenames = glob.glob(str(maestro / '**/*.mid*'))
-        second_model = train(identifier, filenames[:2])
+        first_model = train(identifier, filenames, epochs=50)
+        # filenames = glob.glob(str(maestro / '**/*.mid*'))
+        # second_model = train(identifier, filenames[:2])
 
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/

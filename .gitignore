@@ -187,4 +187,5 @@ training_checkpoints/
 # Custom
 *.midi
 data/
-.midi
+*.model/
+*.model
