@@ -1,7 +1,3 @@
-# This is a sample Python script.
-
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
 # See https://www.tensorflow.org/tutorials/audio/music_generation
 # Temperature https://www.tensorflow.org/text/tutorials/text_generation
 import pandas as pd
@@ -24,12 +20,20 @@ LOSS_WEIGHTS = {
     'duration': 1.0,  # 1.0
 }
 KEY_ORDER = ['pitch', 'step', 'duration']
+FILE_NAME = "{identifier}_{name}_{time}.{extension}"
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+POSITIVE_PRESSURE_STRENGTH = 15
+VOCAB_SIZE = 128
 
 
 def check_dataset_existence():
+    """
+    Checks if datasets exist. If not, dataset is downloaded.
+    :return:
+    """
     maestro = pathlib.Path('data/maestro-v2.0.0')
     if not maestro.exists():
+        print(f"Downloading {maestro}...")
         tf.keras.utils.get_file(
             'maestro-v2.0.0-midi.zip',
             origin='https://storage.googleapis.com/magentadata/datasets/maestro/v2.0.0/maestro-v2.0.0-midi.zip',
@@ -61,12 +65,20 @@ def get_ym2413_file_names_by_emotion(emotion, toptag=True):  # ONLY FOR YM2413 D
     return file_names
 
 
-def notes_to_midi(
+def notes_write_to_midi(
         notes: pd.DataFrame,
         out_file: str,
         instrument_name: str,
         velocity: int = 100,  # note loudness; currently ignored during training. See 
 ) -> pretty_midi.PrettyMIDI:
+    """
+    Converts notes to midi file out_file.
+    :param notes: notes to write
+    :param out_file: file to write to
+    :param instrument_name: instrument being used
+    :param velocity: velocity of every note (all notes have the same velocity as velocity is currently not trained)
+    :return:
+    """
     pm = pretty_midi.PrettyMIDI()
     instrument = pretty_midi.Instrument(
         program=pretty_midi.instrument_name_to_program(
@@ -87,53 +99,67 @@ def notes_to_midi(
 
     pm.instruments.append(instrument)
     pm.write(out_file)
-    return pm
-
+    
 
 def create_sequences(
         dataset: tf.data.Dataset,
         seq_length: int,
-        vocab_size=128,
 ) -> tf.data.Dataset:
-    seq_length = seq_length + 1  # for labels
-
-    # See https://www.tensorflow.org/api_docs/python/tf/data/Dataset#window
-    # creates windows of seq_length where the first element is the second element in the element before
+    """
+    Creates a number of 1 shifted sequences where the "last element" becomes the label. For example:
+    0 1 2 [3] | 4 5
+    1 2 3 [4] | 5
+    2 3 4 [5]
+    That way we can predict a value based on the sequence and see if we hit the last element later.
+    For more information see: See https://www.tensorflow.org/api_docs/python/tf/data/Dataset#window
+    :param dataset: note data
+    :param seq_length: length of the sequence
+    :return:
+    """
+    seq_length = seq_length + 1  # give space for labels
     windows = dataset.window(seq_length, shift=1, stride=1,
                              drop_remainder=True)  # first element of a line is k*shift; following elem is +stride
-
-    # `flat_map` flattens the" dataset of datasets" into batches of tensors
-    flatten = lambda x: x.batch(seq_length, drop_remainder=True)
-    sequences = windows.flat_map(flatten)  # now we have sequences starting with one less the further you go
-
-    # Normalize note pitch
-    def scale_pitch(x):
-        x = x / [vocab_size, 1.0, 1.0]  # divide pitch by vocab size
-        return x
+    sequences = windows.flat_map(lambda x: x.batch(seq_length, drop_remainder=True))  # batch windows
 
     # Split the labels
     def split_labels(sequences):
+        """
+        Split sequences into pitch-normalized note sequence and labels
+        :param sequences: sequence to split
+        :return: tuple (sequence, label)
+        """
         inputs = sequences[:-1]  # take everything but last element of a sequence as input
         labels_dense = sequences[-1]  # take last element of a sequence as label
         labels = {key: labels_dense[i] for i, key in enumerate(KEY_ORDER)}
-        return scale_pitch(inputs), labels
+        return inputs / [VOCAB_SIZE, 1.0, 1.0], labels
 
     return sequences.map(split_labels, num_parallel_calls=tf.data.AUTOTUNE)
 
 
 def mse_with_positive_pressure(y_true: tf.Tensor, y_pred: tf.Tensor):
+    """
+    Just like mse, but the absolute of negative numbers times constant POSITIVE_PRESSURE_STRENGTH
+    is added before calculating the mean. This discourages learning negative values.
+    :param y_true:
+    :param y_pred:
+    :return:
+    """
     mse = (y_true - y_pred) ** 2
-    positive_pressure_strength = 15
-    positive_pressure = positive_pressure_strength * tf.maximum(-y_pred, 0.0)
-    # it's called reduce because it reduces multiple values to one by applying mean
-    return tf.reduce_mean(mse + positive_pressure)
+    positive_pressure = POSITIVE_PRESSURE_STRENGTH * tf.maximum(-y_pred, 0.0)
+    return tf.reduce_mean(mse + positive_pressure)  # reduce to single value by using mean
 
 
 def predict_next_note(
         notes: np.ndarray,
         keras_model: tf.keras.Model,
         temperature: float = 1.0) -> (int, float, float):
-    """Generates a note IDs using a trained sequence model."""
+    """
+    Predicts a single note given a sequence of notes.
+    :param notes: sequence of notes
+    :param keras_model: model to create notes from
+    :param temperature: randomness factor for pitch selection
+    :return: a note (pitch, step, duration)
+    """
 
     if temperature <= 0:
         raise ValueError("Temperature must be >0!")
@@ -152,7 +178,7 @@ def predict_next_note(
     duration = tf.squeeze(duration, axis=-1)
     step = tf.squeeze(step, axis=-1)
 
-    # `step` and `duration` values should be non-negative
+    # `step` and `duration` values should be >0
     if step < 0:
         print(f"Step <0 during prediction!")
     step = tf.maximum(0, step)
@@ -163,12 +189,35 @@ def predict_next_note(
     return int(pitch), float(step), float(duration)
 
 
-def generate_notes(model, input_notes, instrument_name, temperature=2.0, num_predictions=240, file_name=None):
-    # Generate Notes
+def generate_notes_from_file(model, base_file, seq_length=25):
+    """
 
-    # The initial sequence of notes; pitch is normalized similar to training sequences
+    :param model:
+    :param base_file:
+    :param seq_length:
+    :return:
+    """
+    print("Base File: " + base_file)
+    raw_notes = midi_to_notes(base_file)
+    pm = pretty_midi.PrettyMIDI(base_file)
+    instrument = pm.instruments[0]
+    instrument_name = pretty_midi.program_to_instrument_name(instrument.program)
+    sample_notes = np.stack([raw_notes[key] for key in KEY_ORDER], axis=1)
+    return instrument_name, generate_notes(model=model,
+                                           input_notes=(sample_notes[:seq_length] / np.array([VOCAB_SIZE, 1, 1])))
 
-    for x in range(1):
+
+def generate_notes(model, input_notes, instrument_name, temperature=2.0, num_predictions=240):
+    """
+    Given a trained model, sequence of input_notes and an instrument name, a sequence of notes is generated.
+    :param model: trained model
+    :param input_notes: sequence of notes [(pitch, step, duration), ...]
+    :param temperature: randomness factor for pitch selection
+    :param num_predictions: number of notes to predict for returned generated note sequence.
+    :param file_name: name of file to save notes at
+    :return: sequence of generated notes
+    """
+    for x in range(1):  # currently one file is written
         generated_notes = []
         prev_start = 0
         for _ in range(num_predictions):
@@ -183,18 +232,23 @@ def generate_notes(model, input_notes, instrument_name, temperature=2.0, num_pre
 
         generated_notes = pd.DataFrame(
             generated_notes, columns=(*KEY_ORDER, 'start', 'end'))
-
-        example_file = f"{identifier}_example_{datetime.datetime.now().strftime('%H:%M:%S')}_{x}.midi"
-        example_pm = notes_to_midi(
-            generated_notes, out_file=example_file, instrument_name=instrument_name)
-        example_pm.write(example_file)
-
-        plot_notes(generated_notes)
-        plot_distributions(generated_notes)
+    return generated_notes
 
 
 def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, loss_weights=LOSS_WEIGHTS,
           num_files=15, model=None):
+    """
+    Trains and returns a model on files filenames
+    :param identifier: identifier for saved files
+    :param filenames: names of files to use for training
+    :param seq_length: length of sequences to learn on. The larger, the more notes are looked at when predicting
+    :param learning_rate: how fast to learn
+    :param epochs: how often to improve the loss function
+    :param loss_weights: how input variables are weighted
+    :param num_files: how many files to take into account of those given
+    :param model: if defined, no new model will be trained, but training will continue on the old model
+    :return:
+    """
     print("Selected Files: ", filenames[:num_files], "Len:", len(filenames[:num_files]))
 
     # pack all notes of the selected files together
@@ -210,8 +264,7 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
     train_notes = np.stack([all_notes[key] for key in KEY_ORDER], axis=1)  # turn array into key_order
 
     notes_ds = tf.data.Dataset.from_tensor_slices(train_notes)  # just another data format
-    vocab_size = 128  # 128 is maximum pitch range for pretty_midi
-    seq_ds = create_sequences(notes_ds, seq_length, vocab_size)
+    seq_ds = create_sequences(notes_ds, seq_length, VOCAB_SIZE)
     for seq, target in seq_ds.take(1):
         print('sequence shape:', seq.shape)
         print('sequence elements (first 10):', seq[0: 10])
@@ -282,17 +335,6 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
     plot_loss(history)
 
     model.save(f"{identifier}_{datetime.datetime.now().strftime('%H:%M:%S')}_.model")
-
-    base_file = filenames[0]
-    print("Base File: " + base_file)
-    raw_notes = midi_to_notes(base_file)
-    pm = pretty_midi.PrettyMIDI(base_file)
-    instrument = pm.instruments[0]
-    instrument_name = pretty_midi.program_to_instrument_name(instrument.program)
-    sample_notes = np.stack([raw_notes[key] for key in KEY_ORDER], axis=1)
-    generate_notes(model=model,
-                   input_notes=(sample_notes[:seq_length] / np.array([vocab_size, 1, 1])),
-                   instrument_name=instrument_name)
     return model
 
 
@@ -301,14 +343,23 @@ if __name__ == '__main__':
     seed = 42
     tf.random.set_seed(seed)
     np.random.seed(seed)
-
     filenames = []
     # filenames = glob.glob(str(maestro / '**/*.mid*'))
     # filenames = get_music_by_emotion("tense")
+    seq_length = 25
     for identifier in ["Q3"]:  # , "Q2", "Q3", "Q4"]:
         filenames += glob.glob(f"data/EMOPIA_1.0/midis/{identifier}*")
         # do_stuff()
-        first_model = train(identifier, filenames, epochs=50)
+        first_model = train(identifier, filenames, epochs=50, seq_length=seq_length)
+        instrument_name, generated_notes = generate_notes_from_file(model=first_model, base_file=filenames[0],
+                                                                    seq_length=seq_length)
+        midi_file = FILE_NAME.format(identifier, "example", datetime.datetime.now().strftime('%H:%M:%S'), "midi")
+        notes_write_to_midi(
+            generated_notes, out_file=midi_file, instrument_name=instrument_name)
+
+        plot_notes(generated_notes, file_name=f"{identifier}_generated_notes")
+        plot_distributions(generated_notes)
+
         # filenames = glob.glob(str(maestro / '**/*.mid*'))
         # second_model = train(identifier, filenames[:2])
 

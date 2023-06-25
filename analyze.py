@@ -4,6 +4,7 @@ import collections
 import numpy as np
 from matplotlib import pyplot as plt
 from typing import Optional
+import seaborn as sns
 
 
 def midi_to_notes(midi_file: str) -> pd.DataFrame:
@@ -59,7 +60,7 @@ def analyze(file):
     plot_distributions(raw_notes)
 
 
-def plot_distributions(notes: pd.DataFrame, drop_percentile=2.5, show=False):
+def plot_distributions(notes: pd.DataFrame, drop_percentile=2.5, file_name=None):
     # See https://www.tensorflow.org/tutorials/audio/music_generation#extract_notes
     plt.figure(figsize=[15, 5])
     plt.subplot(1, 3, 1)
@@ -72,13 +73,9 @@ def plot_distributions(notes: pd.DataFrame, drop_percentile=2.5, show=False):
     plt.subplot(1, 3, 3)
     max_duration = np.percentile(notes['duration'], 100 - drop_percentile)
     sns.histplot(notes, x="duration", bins=np.linspace(0, max_duration, 21))
-    if show:
-        plt.show()
-    else:
-        plt.savefig("Plot Distributions")
 
 
-def plot_notes(notes: pd.DataFrame, count: Optional[int] = None, show=False):
+def plot_notes(notes: pd.DataFrame, count: Optional[int] = None, file_name=None):
     # See https://www.tensorflow.org/tutorials/audio/music_generation#extract_notes
     if count:
         title = f'First {count} notes'
@@ -93,13 +90,13 @@ def plot_notes(notes: pd.DataFrame, count: Optional[int] = None, show=False):
     plt.xlabel('Time [s]')
     plt.ylabel('Pitch')
     _ = plt.title(title)
-    if show:
-        plt.show()
+    if file_name:
+        plt.savefig(file_name)
     else:
-        plt.savefig()
+        plt.show()
 
 
-def plot_loss(history, show=False):
+def plot_loss(history, file_name=None):
     plt.figure(figsize=[15, 5])
     plt.subplot(1, 4, 1)
     plt.title("Total Loss")
@@ -116,8 +113,7 @@ def plot_loss(history, show=False):
     plt.subplot(1, 4, 4)
     plt.title("Pitch Loss")
     plt.plot(history.epoch, history.history['pitch_loss'], label='pitch loss')
-
-    if show:
-        plt.show()
+    if file_name:
+        plt.savefig(file_name)
     else:
-        plt.savefig("example")
+        plt.show()
