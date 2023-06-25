@@ -15,15 +15,16 @@ from analyze import midi_to_notes, plot_notes, plot_distributions, plot_loss
 _SAMPLING_RATE = 16000
 pretty_midi.pretty_midi.MAX_TICK = 1e10
 LOSS_WEIGHTS = {
-    'pitch': 0.05,  # 0.05
+    'pitch': 0.053,  # 0.05
     'step': 1.0,  # 1.0
     'duration': 1.0,  # 1.0
 }
 KEY_ORDER = ['pitch', 'step', 'duration']
-FILE_NAME = "{identifier}_{name}_{time}.{extension}"
+FILE_NAME = "{identifier}/{time}/{name}.{extension}"
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 POSITIVE_PRESSURE_STRENGTH = 15
 VOCAB_SIZE = 128
+MAESTRO = pathlib.Path('data/maestro-v2.0.0')
 
 
 def check_dataset_existence():
@@ -31,9 +32,8 @@ def check_dataset_existence():
     Checks if datasets exist. If not, dataset is downloaded.
     :return:
     """
-    maestro = pathlib.Path('data/maestro-v2.0.0')
-    if not maestro.exists():
-        print(f"Downloading {maestro}...")
+    if not MAESTRO.exists():
+        print(f"Downloading {MAESTRO}...")
         tf.keras.utils.get_file(
             'maestro-v2.0.0-midi.zip',
             origin='https://storage.googleapis.com/magentadata/datasets/maestro/v2.0.0/maestro-v2.0.0-midi.zip',
@@ -69,7 +69,7 @@ def notes_write_to_midi(
         notes: pd.DataFrame,
         out_file: str,
         instrument_name: str,
-        velocity: int = 100,  # note loudness; currently ignored during training. See 
+        velocity: int = 100,  # note loudness; currently ignored during training. See
 ) -> pretty_midi.PrettyMIDI:
     """
     Converts notes to midi file out_file.
@@ -98,8 +98,15 @@ def notes_write_to_midi(
         prev_start = start
 
     pm.instruments.append(instrument)
+
+    sub_dir_name = os.path.dirname(out_file)
+    if not os.path.isdir(sub_dir_name):
+        dir_name = os.path.dirname(sub_dir_name)
+        if not os.path.isdir(dir_name):
+            os.mkdir(dir_name)
+        os.mkdir(sub_dir_name)
     pm.write(out_file)
-    
+
 
 def create_sequences(
         dataset: tf.data.Dataset,
@@ -207,14 +214,13 @@ def generate_notes_from_file(model, base_file, seq_length=25):
                                            input_notes=(sample_notes[:seq_length] / np.array([VOCAB_SIZE, 1, 1])))
 
 
-def generate_notes(model, input_notes, instrument_name, temperature=2.0, num_predictions=240):
+def generate_notes(model, input_notes, temperature=2.0, num_predictions=240):
     """
     Given a trained model, sequence of input_notes and an instrument name, a sequence of notes is generated.
     :param model: trained model
     :param input_notes: sequence of notes [(pitch, step, duration), ...]
     :param temperature: randomness factor for pitch selection
     :param num_predictions: number of notes to predict for returned generated note sequence.
-    :param file_name: name of file to save notes at
     :return: sequence of generated notes
     """
     for x in range(1):  # currently one file is written
@@ -264,7 +270,7 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
     train_notes = np.stack([all_notes[key] for key in KEY_ORDER], axis=1)  # turn array into key_order
 
     notes_ds = tf.data.Dataset.from_tensor_slices(train_notes)  # just another data format
-    seq_ds = create_sequences(notes_ds, seq_length, VOCAB_SIZE)
+    seq_ds = create_sequences(notes_ds, seq_length)
     for seq, target in seq_ds.take(1):
         print('sequence shape:', seq.shape)
         print('sequence elements (first 10):', seq[0: 10])
@@ -319,7 +325,7 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
             save_weights_only=True),
         tf.keras.callbacks.EarlyStopping(
             monitor='loss',
-            patience=5,
+            patience=10,
             verbose=1,
             restore_best_weights=True),
         # gw,
@@ -332,7 +338,9 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
         # shuffle=True,  # already shuffled before
 
     )
-    plot_loss(history)
+    plot_loss(history, file_name=FILE_NAME.format(identifier=identifier, name="plot_loss",
+                                                  time=time,
+                                                  extension="png"))
 
     model.save(f"{identifier}_{datetime.datetime.now().strftime('%H:%M:%S')}_.model")
     return model
@@ -341,26 +349,34 @@ def train(identifier, filenames, seq_length=25, learning_rate=0.005, epochs=25, 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     seed = 42
+    time = datetime.datetime.now().strftime('%H:%M:%S')
     tf.random.set_seed(seed)
     np.random.seed(seed)
-    filenames = []
     # filenames = glob.glob(str(maestro / '**/*.mid*'))
     # filenames = get_music_by_emotion("tense")
-    seq_length = 25
-    for identifier in ["Q3"]:  # , "Q2", "Q3", "Q4"]:
-        filenames += glob.glob(f"data/EMOPIA_1.0/midis/{identifier}*")
+    seq_length = 50
+    for identifier in ["Q1"]:  # , "Q2", "Q3", "Q4"]:
+        # filenames = glob.glob(str(MAESTRO / '**/*.mid*'))
+        # first_model = train(identifier, filenames, epochs=50, seq_length=seq_length)
+        filenames = glob.glob(f"data/EMOPIA_1.0/midis/{identifier}*")
         # do_stuff()
-        first_model = train(identifier, filenames, epochs=50, seq_length=seq_length)
-        instrument_name, generated_notes = generate_notes_from_file(model=first_model, base_file=filenames[0],
+        model = train(identifier, filenames, epochs=1, seq_length=seq_length, num_files=1)
+        instrument_name, generated_notes = generate_notes_from_file(model=model, base_file=filenames[0],
                                                                     seq_length=seq_length)
-        midi_file = FILE_NAME.format(identifier, "example", datetime.datetime.now().strftime('%H:%M:%S'), "midi")
+        midi_file = FILE_NAME.format(identifier=identifier,
+                                     name="example",
+                                     time=time,
+                                     extension="midi")
         notes_write_to_midi(
             generated_notes, out_file=midi_file, instrument_name=instrument_name)
 
-        plot_notes(generated_notes, file_name=f"{identifier}_generated_notes")
-        plot_distributions(generated_notes)
-
-        # filenames = glob.glob(str(maestro / '**/*.mid*'))
-        # second_model = train(identifier, filenames[:2])
+        plot_notes(generated_notes, file_name=FILE_NAME.format(identifier=identifier,
+                                                               name="plot_notes",
+                                                               time=time,
+                                                               extension="png"))
+        plot_distributions(generated_notes, file_name=FILE_NAME.format(identifier=identifier,
+                                                                       name="plot_distributions",
+                                                                       time=time,
+                                                                       extension="png"))
 
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/

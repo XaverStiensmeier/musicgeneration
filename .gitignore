@@ -188,4 +188,6 @@ training_checkpoints/
 *.midi
 data/
 *.model/
+*.png
+*.jpg
 *.model
